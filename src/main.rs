@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    path::PathBuf,
     process::exit,
     time::{Duration, Instant},
 };
@@ -16,6 +17,8 @@ use tracing::{debug, error, metadata::LevelFilter};
 struct Args {
     #[clap(short, long, default_value_t = 1)]
     debounce: u64,
+    #[clap(short, long, default_value = ".")]
+    path: PathBuf,
     command: OsString,
     args: Vec<OsString>,
 }
@@ -31,7 +34,7 @@ async fn try_main(args: Args) -> anyhow::Result<()> {
         Err(e) => error!("watch error: {:?}", e),
     })?;
 
-    for result in Walk::new(".") {
+    for result in Walk::new(&args.path) {
         let entry = result?;
         debug!("watching '{}'", entry.path().display());
         watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
