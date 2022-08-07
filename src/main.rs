@@ -42,7 +42,7 @@ async fn try_main(args: Args) -> anyhow::Result<()> {
     loop {
         match timeout(debounce_remaining, rcv.recv()).await {
             Ok(Some(event)) => {
-                debug!("fsevent");
+                debug!("{:?}", event);
                 if debounce_remaining == Duration::MAX {
                     debug!("updating timeout");
                     debounce_start = Instant::now();
