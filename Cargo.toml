@@ -15,5 +15,7 @@ tokio = { version = "1.20.1", features = [
     "time",
     "process",
 ] }
+tracing = "0.1.36"
+tracing-subscriber = "0.3.15"
 
 # tokio = { version = "1.20.1", features = ["macros", "rt-multithread"] }
