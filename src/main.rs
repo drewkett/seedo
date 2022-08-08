@@ -50,33 +50,43 @@ async fn run_command(command: &OsStr, args: &[OsString]) {
     }
 }
 
-struct Debounce {
+/// A helper struct to implement debouncing. It takes a [`Duration`] which
+/// indicates the time to debounce for when run.
+struct DebounceTimer {
     start: Option<Instant>,
-    debounce_duration: Duration,
+    duration: Duration,
 }
 
-impl Debounce {
-    fn new(debounce_duration: Duration) -> Debounce {
-        Debounce {
+impl DebounceTimer {
+    /// Create a [`DebounceTimer`] struct. `duration` is the length of time to
+    /// debounce for when using the timer.
+    fn new(duration: Duration) -> DebounceTimer {
+        DebounceTimer {
             start: None,
-            debounce_duration,
+            duration,
         }
     }
 
+    /// This mimics the [`tokio::time::timeout`] interface. If the timer is
+    /// running, calculate the remaining duration until the timer is finished,
+    /// and pass that to [`tokio::time::timeout`] along with the future. If the
+    /// timer is stopped, this will simply call `await` on the given [`Future`]
     async fn timeout<F: Future>(&self, fut: F) -> Result<F::Output, Elapsed> {
         match self.start {
             Some(start) => {
-                let duration = self.debounce_duration.saturating_sub(start.elapsed());
+                let duration = self.duration.saturating_sub(start.elapsed());
                 timeout(duration, fut).await
             }
             None => Ok(fut.await),
         }
     }
 
+    /// Stops the timer.
     fn stop(&mut self) {
         self.start = None
     }
 
+    /// Starts the timer if it wasn't previously started.
     fn start_if_stopped(&mut self) {
         if self.start.is_none() {
             self.start = Some(Instant::now())
@@ -84,6 +94,8 @@ impl Debounce {
     }
 }
 
+/// This takes an [`notify::Event`] and calls [`FsEventWatcher::watch`] on any
+/// newly created files.
 fn watch_new_files(watcher: &mut FsEventWatcher, event: &Event) {
     if let EventKind::Create(_create_kind) = event.kind {
         for path in &event.paths {
@@ -136,7 +148,7 @@ async fn try_main(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    let mut debounce = Debounce::new(Duration::from_secs(args.debounce));
+    let mut debounce = DebounceTimer::new(Duration::from_millis(args.debounce_ms));
     loop {
         match debounce.timeout(rcv.recv()).await {
             Ok(Some(event)) => {

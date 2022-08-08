@@ -1,10 +1,10 @@
 [package]
-name = "watchme"
+name = "seedo"
 version = "0.1.0"
 edition = "2021"
 authors = ["Andrew Burkett <burkett.andrew@gmail.com>"]
 description = "A command runner triggered by filesystem events"
-repository = "https://github.com/drewkett/watchme"
+repository = "https://github.com/drewkett/seedo"
 
 [dependencies]
 anyhow = "1.0.60"
