@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use ignore::Walk;
+use ignore::{Walk, WalkBuilder};
 use notify::{event::ModifyKind, Event, EventKind, FsEventWatcher, RecursiveMode, Watcher};
 use tokio::{
     process::Command,
@@ -115,6 +115,9 @@ struct Args {
     /// Debounce time in milliseconds
     #[clap(short, long = "debounce", default_value_t = 50)]
     debounce_ms: u64,
+    /// Don't read .gitignore files
+    #[clap(long)]
+    skip_ignore_files: bool,
     /// Paths to watch
     #[clap(short, long, default_value = ".")]
     path: Vec<PathBuf>,
@@ -140,12 +143,22 @@ async fn try_main(args: Args) -> anyhow::Result<()> {
     })?;
 
     // Use `ignore` to walk all given paths to add watch events.
-    for path in &args.path {
-        for result in Walk::new(&path) {
-            let entry = result?;
-            debug!("watching '{}'", entry.path().display());
-            watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
-        }
+    let mut path_iter = args.path.iter();
+    let mut walk_builder = WalkBuilder::new(path_iter.next().expect("at least one path required"));
+    for path in path_iter {
+        walk_builder.add(path);
+    }
+    if args.skip_ignore_files {
+        walk_builder
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false);
+    }
+    for result in walk_builder.build() {
+        let entry = result?;
+        debug!("watching '{}'", entry.path().display());
+        watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
     }
 
     let mut debounce = DebounceTimer::new(Duration::from_millis(args.debounce_ms));
