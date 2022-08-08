@@ -1,19 +1,15 @@
 use std::{
     ffi::{OsStr, OsString},
-    future::Future,
     path::PathBuf,
-    process::exit,
+    process::{exit, Command},
     time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context};
 use clap::Parser;
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, FsEventWatcher, RecursiveMode, Watcher};
-use tokio::{
-    process::Command,
-    time::{error::Elapsed, timeout},
-};
 use tracing::{debug, error, warn};
 
 /// Filter out events that should not trigger re-running the command. This takes
@@ -27,8 +23,8 @@ fn should_event_trigger(event: &Event) -> bool {
 }
 
 /// Run the specified command + args and log any errors that occur.
-async fn run_command(command: &OsStr, args: &[OsString]) {
-    let res = Command::new(command).args(args).status().await;
+fn run_command(command: &OsStr, args: &[OsString]) {
+    let res = Command::new(command).args(args).status();
     match res.context("command failed to launch") {
         Ok(status) if status.success() => {}
         Ok(status) => match status.code() {
@@ -58,17 +54,16 @@ impl DebounceTimer {
         }
     }
 
-    /// This mimics the [`tokio::time::timeout`] interface. If the timer is
-    /// running, calculate the remaining duration until the timer is finished,
-    /// and pass that to [`tokio::time::timeout`] along with the future. If the
-    /// timer is stopped, this will simply call `await` on the given [`Future`]
-    async fn timeout<F: Future>(&self, fut: F) -> Result<F::Output, Elapsed> {
+    /// This mimics the [`crossbeam_channel::Receiver::recv_timeout`] behavior
+    /// except that it falls back to [`crossbeam_channel::Receiver::recv`] if
+    /// the timer has not been started.
+    fn timeout(&self, receiver: &Receiver<Event>) -> Result<Event, RecvTimeoutError> {
         match self.start {
             Some(start) => {
                 let duration = self.duration.saturating_sub(start.elapsed());
-                timeout(duration, fut).await
+                receiver.recv_timeout(duration)
             }
-            None => Ok(fut.await),
+            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
     }
 
@@ -121,9 +116,8 @@ struct Opts {
     command_to_run: Vec<OsString>,
 }
 
-#[tokio::main]
-async fn try_main(opts: Opts) -> anyhow::Result<()> {
-    let (snd, mut rcv) = tokio::sync::mpsc::unbounded_channel();
+fn try_main(opts: Opts) -> anyhow::Result<()> {
+    let (snd, rcv) = unbounded();
     // Initialize fs watcher
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(event) => {
@@ -164,8 +158,8 @@ async fn try_main(opts: Opts) -> anyhow::Result<()> {
 
     let mut debounce = DebounceTimer::new(Duration::from_millis(opts.debounce_ms));
     loop {
-        match debounce.timeout(rcv.recv()).await {
-            Ok(Some(event)) => {
+        match debounce.timeout(&rcv) {
+            Ok(event) => {
                 debug!("{:?}", event);
                 // We need to watch newly created files for changes.
                 if let EventKind::Create(_) = event.kind {
@@ -176,16 +170,16 @@ async fn try_main(opts: Opts) -> anyhow::Result<()> {
             }
             // This indicates the channel has closed. It shouldn't happen, but
             // in case it does break from the loop and exit the program.
-            Ok(None) => {
+            Err(RecvTimeoutError::Disconnected) => {
                 warn!("event channel closed");
                 break;
             }
-            Err(_) => {
+            Err(RecvTimeoutError::Timeout) => {
                 debug!("timeout reached. running command");
             }
         };
         debounce.stop();
-        run_command(&command, &args).await;
+        run_command(&command, &args);
     }
 
     Ok(())

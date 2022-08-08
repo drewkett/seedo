@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2
+
+- Remove tokio as dependency as it isn't needed.
+
 ## v0.1.1
 
 - Improve command line argument handling for the specified command. Now `seedo`
