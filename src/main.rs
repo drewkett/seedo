@@ -100,7 +100,7 @@ fn watch_new_files(watcher: &mut FsEventWatcher, event: &Event) {
 /// will respect .gitignore files. The wait time after seeing a file system
 /// event is the configurable debounce time.
 #[derive(Parser)]
-#[clap(trailing_var_arg = true)]
+#[clap(author, version, trailing_var_arg = true)]
 struct Opts {
     /// Debounce time in milliseconds
     #[clap(short, long = "debounce", default_value_t = 50)]

@@ -1,5 +1,9 @@
 # Changelog
 
+## next
+
+- Add version and author info to cli help
+
 ## v0.1.2
 
 - Remove tokio as dependency as it isn't needed.
