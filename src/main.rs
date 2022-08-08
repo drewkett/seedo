@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use ignore::{Walk, WalkBuilder};
+use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, FsEventWatcher, RecursiveMode, Watcher};
 use tokio::{
     process::Command,
@@ -25,8 +25,6 @@ fn should_event_trigger(event: &Event) -> bool {
         EventKind::Modify(ModifyKind::Metadata(_)) => false,
         // Drop access events
         EventKind::Access(_) => false,
-        // Unsure if this needs to be handled
-        // EventKind::Modify(ModifyKind::Name(_)) => None,
         EventKind::Modify(_) => true,
         EventKind::Create(_) => true,
         EventKind::Remove(_) => true,
@@ -51,7 +49,7 @@ async fn run_command(command: &OsStr, args: &[OsString]) {
 }
 
 /// A helper struct to implement debouncing. It takes a [`Duration`] which
-/// indicates the time to debounce for when run.
+/// indicates the time to wait after a new event before running the command.
 struct DebounceTimer {
     start: Option<Instant>,
     duration: Duration,
@@ -109,6 +107,10 @@ fn watch_new_files(watcher: &mut FsEventWatcher, event: &Event) {
     }
 }
 
+/// seedo recursively watches a specified directory for file system events,
+/// which then triggers a specified command to be executed. By default, seedo
+/// will respect .gitignore files. The wait time after seeing a file system
+/// event is the configurable debounce time.
 #[derive(Parser)]
 #[clap(trailing_var_arg = true)]
 struct Args {
