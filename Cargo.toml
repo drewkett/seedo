@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Andrew Burkett <burkett.andrew@gmail.com>"]
 description = "A command runner triggered by filesystem events"
 repository = "https://github.com/drewkett/seedo"
+license = "Unlicense"
 
 [dependencies]
 anyhow = "1.0.60"
