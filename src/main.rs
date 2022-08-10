@@ -9,7 +9,7 @@ use anyhow::{bail, Context};
 use clap::Parser;
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use ignore::WalkBuilder;
-use notify::{event::ModifyKind, Event, EventKind, FsEventWatcher, RecursiveMode, Watcher};
+use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
 use tracing::{debug, error, warn};
 
 /// Filter out events that should not trigger re-running the command. This takes
@@ -80,9 +80,9 @@ impl DebounceTimer {
     }
 }
 
-/// This takes an [`notify::Event`] and calls [`FsEventWatcher::watch`] on any
+/// This takes an [`notify::Event`] and calls [`Watcher::watch`] on any
 /// newly created files.
-fn watch_new_files(watcher: &mut FsEventWatcher, event: &Event) {
+fn watch_new_files(watcher: &mut impl Watcher, event: &Event) {
     if let EventKind::Create(_create_kind) = event.kind {
         for path in &event.paths {
             if path.exists() {

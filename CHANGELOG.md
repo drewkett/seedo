@@ -1,7 +1,8 @@
 # Changelog
 
-## next
+## v0.1.3
 
+- Fix Cross Compatibililty bug
 - Add version and author info to cli help
 
 ## v0.1.2
