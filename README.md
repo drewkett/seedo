@@ -34,3 +34,9 @@ OPTIONS:
     -p, --path <PATH>               Paths to watch [default: .]
         --skip-ignore-files         Don't read .gitignore files
 ```
+
+## Installation
+
+```
+cargo install seedo
+```
