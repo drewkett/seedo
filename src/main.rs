@@ -54,15 +54,17 @@ impl DebounceTimer {
         }
     }
 
+    fn calculate_timeout(&self) -> Option<Duration> {
+        self.start
+            .map(|start| self.duration.saturating_sub(start.elapsed()))
+    }
+
     /// This mimics the [`crossbeam_channel::Receiver::recv_timeout`] behavior
     /// except that it falls back to [`crossbeam_channel::Receiver::recv`] if
     /// the timer has not been started.
     fn timeout(&self, receiver: &Receiver<Event>) -> Result<Event, RecvTimeoutError> {
-        match self.start {
-            Some(start) => {
-                let duration = self.duration.saturating_sub(start.elapsed());
-                receiver.recv_timeout(duration)
-            }
+        match self.calculate_timeout() {
+            Some(duration) => receiver.recv_timeout(duration),
             None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
         }
     }
@@ -76,6 +78,46 @@ impl DebounceTimer {
     fn start_if_stopped(&mut self) {
         if self.start.is_none() {
             self.start = Some(Instant::now());
+        }
+    }
+}
+
+struct DebounceTimerSet {
+    timers: Vec<DebounceTimer>,
+}
+
+impl DebounceTimerSet {
+    fn calculate_timeout(&self) -> Option<Duration> {
+        let mut duration = None;
+        for timer in self.timers {
+            if let Some(timer_duration) = timer.calculate_timeout() {
+                match &mut duration {
+                    Some(duration) => *duration = std::cmp::min(*duration, timer_duration),
+                    None => duration = Some(timer_duration),
+                }
+            };
+        }
+        duration
+    }
+    /// This mimics the [`crossbeam_channel::Receiver::recv_timeout`] behavior
+    /// except that it falls back to [`crossbeam_channel::Receiver::recv`] if
+    /// the timer has not been started.
+    fn timeout(&self, receiver: &Receiver<Event>) -> Result<Event, RecvTimeoutError> {
+        match self.calculate_timeout() {
+            Some(duration) => receiver.recv_timeout(duration),
+            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        }
+    }
+
+    /// Stops the timer.
+    fn stop(&mut self, idx: usize) {
+        self.timers[idx].start = None;
+    }
+
+    /// Starts the timer if it wasn't previously started.
+    fn start_if_stopped(&mut self, idx: usize) {
+        if self.timers[idx].start.is_none() {
+            self.timers[idx].start = Some(Instant::now());
         }
     }
 }
@@ -226,15 +268,19 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
         });
     }
 
+    let debounce_timer = DebounceTimerSet {
+        timers: seedos.iter().map(|s| s.debounce_timer).collect(),
+    };
+
     loop {
-        match debounce.timeout(&rcv) {
+        match debounce_timer.timeout(&rcv) {
             Ok(event) => {
                 debug!("{:?}", event);
                 // We need to watch newly created files for changes.
                 if let EventKind::Create(_) = event.kind {
                     watch_new_files(&mut watcher, &event);
                 }
-                debounce.start_if_stopped();
+                debounce_timer.start_if_stopped();
                 continue;
             }
             // This indicates the channel has closed. It shouldn't happen, but
@@ -247,7 +293,7 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
                 debug!("timeout reached. running command");
             }
         };
-        debounce.stop();
+        debounce_timer.stop();
         run_command(&config.command_to_run.command, &config.command_to_run.args);
     }
 
