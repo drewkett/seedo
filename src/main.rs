@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
-use glob::glob;
+use glob::{glob, Pattern};
 use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
 use tracing::{debug, error, warn};
@@ -23,6 +23,7 @@ fn should_event_trigger(event: &Event) -> bool {
 }
 
 /// Run the specified command + args and log any errors that occur.
+#[allow(dead_code)]
 fn run_command(command: &OsStr, args: &[OsString]) {
     let res = Command::new(command).args(args).status();
     match res.context("command failed to launch") {
@@ -59,13 +60,21 @@ impl DebounceTimer {
             .map(|start| self.duration.saturating_sub(start.elapsed()))
     }
 
-    /// This mimics the [`crossbeam_channel::Receiver::recv_timeout`] behavior
-    /// except that it falls back to [`crossbeam_channel::Receiver::recv`] if
-    /// the timer has not been started.
-    fn timeout(&self, receiver: &Receiver<Event>) -> Result<Event, RecvTimeoutError> {
-        match self.calculate_timeout() {
-            Some(duration) => receiver.recv_timeout(duration),
-            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    // /// This mimics the [`crossbeam_channel::Receiver::recv_timeout`] behavior
+    // /// except that it falls back to [`crossbeam_channel::Receiver::recv`] if
+    // /// the timer has not been started.
+    // fn timeout(&self, receiver: &Receiver<Event>) -> Result<Event, RecvTimeoutError> {
+    //     match self.calculate_timeout() {
+    //         Some(duration) => receiver.recv_timeout(duration),
+    //         None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    //     }
+    // }
+
+    /// Stops the timer.
+    fn expired(&self) -> bool {
+        match self.start {
+            Some(start) => Instant::now() > start + self.duration,
+            None => false,
         }
     }
 
@@ -89,7 +98,7 @@ struct DebounceTimerSet {
 impl DebounceTimerSet {
     fn calculate_timeout(&self) -> Option<Duration> {
         let mut duration = None;
-        for timer in self.timers {
+        for timer in &self.timers {
             if let Some(timer_duration) = timer.calculate_timeout() {
                 match &mut duration {
                     Some(duration) => *duration = std::cmp::min(*duration, timer_duration),
@@ -106,18 +115,6 @@ impl DebounceTimerSet {
         match self.calculate_timeout() {
             Some(duration) => receiver.recv_timeout(duration),
             None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
-        }
-    }
-
-    /// Stops the timer.
-    fn stop(&mut self, idx: usize) {
-        self.timers[idx].start = None;
-    }
-
-    /// Starts the timer if it wasn't previously started.
-    fn start_if_stopped(&mut self, idx: usize) {
-        if self.timers[idx].start.is_none() {
-            self.timers[idx].start = Some(Instant::now());
         }
     }
 }
@@ -158,6 +155,7 @@ struct Opts {
     command_to_run: Vec<OsString>,
 }
 
+#[allow(dead_code)]
 enum CommandToRun {
     Vec(Vec<OsString>),
     String(String),
@@ -199,8 +197,7 @@ struct SeedoConfig {
 
 struct Seedo {
     command: Command,
-    globs: Vec<String>,
-    debounce_timer: DebounceTimer,
+    patterns: Vec<Pattern>,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -231,7 +228,8 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
         });
     }
 
-    let seedos = vec![];
+    let mut seedos = vec![];
+    let mut debounce_timers = vec![];
     for config in &configs {
         let command = config.command_to_run.to_command()?;
         let mut path_iter = config
@@ -260,16 +258,17 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
             watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
         }
 
-        let mut debounce_timer = DebounceTimer::new(config.debounce_duration);
-        seedos.push(Seedo {
-            command,
-            globs: config.globs,
-            debounce_timer,
-        });
+        let mut patterns = vec![];
+        for glob in &config.globs {
+            patterns.push(Pattern::new(glob)?);
+        }
+
+        debounce_timers.push(DebounceTimer::new(config.debounce_duration));
+        seedos.push(Seedo { command, patterns });
     }
 
-    let debounce_timer = DebounceTimerSet {
-        timers: seedos.iter().map(|s| s.debounce_timer).collect(),
+    let mut debounce_timer = DebounceTimerSet {
+        timers: debounce_timers,
     };
 
     loop {
@@ -280,7 +279,18 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
                 if let EventKind::Create(_) = event.kind {
                     watch_new_files(&mut watcher, &event);
                 }
-                debounce_timer.start_if_stopped();
+                'outer: for (timer, seedo) in
+                    debounce_timer.timers.iter_mut().zip(seedos.iter_mut())
+                {
+                    for path in &event.paths {
+                        for pattern in &seedo.patterns {
+                            if pattern.matches_path(path) {
+                                timer.start_if_stopped();
+                                continue 'outer;
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             // This indicates the channel has closed. It shouldn't happen, but
@@ -293,8 +303,22 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
                 debug!("timeout reached. running command");
             }
         };
-        debounce_timer.stop();
-        run_command(&config.command_to_run.command, &config.command_to_run.args);
+        for (timer, seedo) in debounce_timer.timers.iter_mut().zip(seedos.iter_mut()) {
+            if timer.expired() {
+                timer.stop();
+                let res = seedo.command.status();
+                match res.context("command failed to launch") {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => match status.code() {
+                        Some(code) => error!("command exited with code = {code}"),
+                        None => error!("command exited without code"),
+                    },
+                    Err(e) => {
+                        error!("{:#}", e);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
