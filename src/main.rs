@@ -1,13 +1,13 @@
 use std::{
     ffi::{OsStr, OsString},
-    path::PathBuf,
     process::{exit, Command},
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Context};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
+use glob::glob;
 use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
 use tracing::{debug, error, warn};
@@ -109,13 +109,59 @@ struct Opts {
     #[clap(long)]
     skip_ignore_files: bool,
     /// Paths to watch
-    #[clap(short, long, default_value = ".")]
-    path: Vec<PathBuf>,
+    #[clap(short, long, default_value = "**")]
+    glob: Vec<String>,
     /// Command to run with any arguments
     #[clap(required = true)]
     command_to_run: Vec<OsString>,
 }
 
+enum CommandToRun {
+    Vec(Vec<OsString>),
+    String(String),
+}
+
+impl CommandToRun {
+    fn to_command(&self) -> Result<Command> {
+        match self {
+            CommandToRun::Vec(v) => command_from_iter(v),
+            CommandToRun::String(s) => command_from_str(s),
+        }
+    }
+}
+
+fn command_from_iter(iter: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<Command> {
+    let mut iter = iter.into_iter();
+    let mut command = match iter.next() {
+        Some(command) => Command::new(command),
+        None => bail!("no command given"),
+    };
+    command.args(iter);
+    Ok(command)
+}
+
+#[allow(dead_code)]
+fn command_from_str(s: &str) -> Result<Command> {
+    match shlex::split(s) {
+        Some(items) => command_from_iter(items),
+        None => bail!("no command given"),
+    }
+}
+
+struct SeedoConfig {
+    command_to_run: CommandToRun,
+    globs: Vec<String>,
+    skip_ignore_files: bool,
+    debounce_duration: Duration,
+}
+
+struct Seedo {
+    command: Command,
+    globs: Vec<String>,
+    debounce_timer: DebounceTimer,
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn try_main(opts: Opts) -> anyhow::Result<()> {
     let (snd, rcv) = unbounded();
     // Initialize fs watcher
@@ -133,30 +179,53 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
     if opts.command_to_run.is_empty() {
         bail!("No command given")
     }
-    let mut command_to_run = opts.command_to_run;
-    let command = command_to_run.remove(0);
-    let args = command_to_run;
-
-    // Use `ignore` to walk all given paths to add watch events.
-    let mut path_iter = opts.path.iter();
-    let mut walk_builder = WalkBuilder::new(path_iter.next().expect("at least one path required"));
-    for path in path_iter {
-        walk_builder.add(path);
-    }
-    if opts.skip_ignore_files {
-        walk_builder
-            .ignore(false)
-            .git_ignore(false)
-            .git_global(false)
-            .git_exclude(false);
-    }
-    for result in walk_builder.build() {
-        let entry = result?;
-        debug!("watching '{}'", entry.path().display());
-        watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
+    let mut configs = vec![];
+    if !opts.command_to_run.is_empty() {
+        configs.push(SeedoConfig {
+            command_to_run: CommandToRun::Vec(opts.command_to_run.clone()),
+            globs: opts.glob.clone(),
+            skip_ignore_files: opts.skip_ignore_files,
+            debounce_duration: Duration::from_millis(opts.debounce_ms),
+        });
     }
 
-    let mut debounce = DebounceTimer::new(Duration::from_millis(opts.debounce_ms));
+    let seedos = vec![];
+    for config in &configs {
+        let command = config.command_to_run.to_command()?;
+        let mut path_iter = config
+            .globs
+            .iter()
+            .filter_map(|p| glob(p).ok())
+            .flatten()
+            .filter_map(Result::ok);
+        let mut walk_builder = match path_iter.next() {
+            Some(path) => WalkBuilder::new(path),
+            None => bail!("no paths given"),
+        };
+        for path in path_iter {
+            walk_builder.add(path);
+        }
+        if config.skip_ignore_files {
+            walk_builder
+                .ignore(false)
+                .git_ignore(false)
+                .git_global(false)
+                .git_exclude(false);
+        }
+        for result in walk_builder.build() {
+            let entry = result?;
+            debug!("watching '{}'", entry.path().display());
+            watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
+        }
+
+        let mut debounce_timer = DebounceTimer::new(config.debounce_duration);
+        seedos.push(Seedo {
+            command,
+            globs: config.globs,
+            debounce_timer,
+        });
+    }
+
     loop {
         match debounce.timeout(&rcv) {
             Ok(event) => {
@@ -179,7 +248,7 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
             }
         };
         debounce.stop();
-        run_command(&command, &args);
+        run_command(&config.command_to_run.command, &config.command_to_run.args);
     }
 
     Ok(())
