@@ -1,0 +1,12 @@
+
+[[seedo]]
+command_to_run = "echo hi from readme"
+globs = ["README.md"]
+
+[[seedo]]
+command_to_run = ["echo", "hi from markdown"]
+globs = ["*.md"]
+
+[[seedo]]
+command_to_run = ["echo", "hi from rust"]
+globs = ["**/*.rs"]

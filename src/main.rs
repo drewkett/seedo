@@ -1,5 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
+    fs::read_to_string,
+    path::{Path, PathBuf},
     process::{exit, Command},
     time::{Duration, Instant},
 };
@@ -10,6 +12,8 @@ use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use glob::{glob, Pattern};
 use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
+use path_absolutize::Absolutize;
+use serde::Deserialize;
 use tracing::{debug, error, warn};
 
 /// Filter out events that should not trigger re-running the command. This takes
@@ -144,20 +148,23 @@ struct Opts {
     /// Debounce time in milliseconds
     #[clap(short, long = "debounce", default_value_t = 50)]
     debounce_ms: u64,
-    /// Don't read .gitignore files
+    /// don't read .gitignore files
     #[clap(long)]
     skip_ignore_files: bool,
+    /// seedo.toml file
+    #[clap(long, default_value = "seedo.toml")]
+    config: PathBuf,
     /// Paths to watch
     #[clap(short, long, default_value = "**")]
     glob: Vec<String>,
     /// Command to run with any arguments
-    #[clap(required = true)]
-    command_to_run: Vec<OsString>,
+    command_to_run: Vec<String>,
 }
 
-#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(untagged)]
 enum CommandToRun {
-    Vec(Vec<OsString>),
+    Vec(Vec<String>),
     String(String),
 }
 
@@ -188,17 +195,31 @@ fn command_from_str(s: &str) -> Result<Command> {
     }
 }
 
+#[derive(Deserialize)]
+struct SeedoToml {
+    seedo: Vec<SeedoConfig>,
+}
+
+fn default_debounce_ms() -> u64 {
+    50
+}
+
+#[derive(Deserialize)]
 struct SeedoConfig {
     command_to_run: CommandToRun,
     globs: Vec<String>,
+    #[serde(default)]
     skip_ignore_files: bool,
-    debounce_duration: Duration,
+    #[serde(default = "default_debounce_ms")]
+    debounce_ms: u64,
 }
 
 struct Seedo {
     command: Command,
     patterns: Vec<Pattern>,
 }
+
+// TODO glob executes before walkdir which reads gitignore
 
 #[allow(clippy::needless_pass_by_value)]
 fn try_main(opts: Opts) -> anyhow::Result<()> {
@@ -215,27 +236,32 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
         Err(e) => error!("watch error: {:?}", e),
     })?;
 
-    if opts.command_to_run.is_empty() {
-        bail!("No command given")
-    }
     let mut configs = vec![];
     if !opts.command_to_run.is_empty() {
         configs.push(SeedoConfig {
             command_to_run: CommandToRun::Vec(opts.command_to_run.clone()),
             globs: opts.glob.clone(),
             skip_ignore_files: opts.skip_ignore_files,
-            debounce_duration: Duration::from_millis(opts.debounce_ms),
+            debounce_ms: opts.debounce_ms,
         });
+    } else {
+        let config_bytes = read_to_string(&opts.config)?;
+        let seedo_toml: SeedoToml = toml::from_str(&config_bytes)?;
+        configs.extend(seedo_toml.seedo);
     }
 
     let mut seedos = vec![];
     let mut debounce_timers = vec![];
     for config in &configs {
         let command = config.command_to_run.to_command()?;
-        let mut path_iter = config
-            .globs
+        let mut abs_globs = vec![];
+        for glob in &config.globs {
+            let p = Path::new(glob).absolutize()?;
+            abs_globs.push(p.to_string_lossy().to_string());
+        }
+        let mut path_iter = abs_globs
             .iter()
-            .filter_map(|p| glob(p).ok())
+            .filter_map(|p| glob(&p).ok())
             .flatten()
             .filter_map(Result::ok);
         let mut walk_builder = match path_iter.next() {
@@ -254,16 +280,18 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
         }
         for result in walk_builder.build() {
             let entry = result?;
-            debug!("watching '{}'", entry.path().display());
+            println!("watching '{}'", entry.path().display());
             watcher.watch(entry.path(), RecursiveMode::NonRecursive)?;
         }
 
         let mut patterns = vec![];
-        for glob in &config.globs {
-            patterns.push(Pattern::new(glob)?);
+        for glob in abs_globs {
+            patterns.push(Pattern::new(&glob)?);
         }
 
-        debounce_timers.push(DebounceTimer::new(config.debounce_duration));
+        debounce_timers.push(DebounceTimer::new(Duration::from_millis(
+            config.debounce_ms,
+        )));
         seedos.push(Seedo { command, patterns });
     }
 
@@ -283,8 +311,11 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
                     debounce_timer.timers.iter_mut().zip(seedos.iter_mut())
                 {
                     for path in &event.paths {
+                        println!("event path {}", path.display());
                         for pattern in &seedo.patterns {
+                            println!("pattern {}", pattern);
                             if pattern.matches_path(path) {
+                                println!("start if stopped on {:?}", seedo.command);
                                 timer.start_if_stopped();
                                 continue 'outer;
                             }
