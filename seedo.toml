@@ -10,3 +10,8 @@ globs = ["*.md"]
 [[seedo]]
 command_to_run = ["echo", "hi from rust"]
 globs = ["**/*.rs"]
+
+
+[[seedo]]
+command_to_run = ["echo", "hi from parent"]
+globs = ["../**/*.rs"]

@@ -1,3 +1,5 @@
+mod glob_watcher;
+
 use std::{
     ffi::{OsStr, OsString},
     fs::read_to_string,
@@ -10,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError};
 use glob::{glob, Pattern};
+use glob_watcher::GlobWatcher;
 use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
 use path_absolutize::Absolutize;
@@ -237,17 +240,22 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
     })?;
 
     let mut configs = vec![];
-    if !opts.command_to_run.is_empty() {
+    if opts.command_to_run.is_empty() {
+        let config_bytes = read_to_string(&opts.config)?;
+        let seedo_toml: SeedoToml = toml::from_str(&config_bytes)?;
+        for config in &seedo_toml.seedo {
+            let watcher = GlobWatcher::from_patterns(&config.globs)?;
+            println!("{:#?}", watcher);
+        }
+        configs.extend(seedo_toml.seedo);
+    } else {
+        let _watcher = GlobWatcher::from_patterns(&opts.glob)?;
         configs.push(SeedoConfig {
             command_to_run: CommandToRun::Vec(opts.command_to_run.clone()),
             globs: opts.glob.clone(),
             skip_ignore_files: opts.skip_ignore_files,
             debounce_ms: opts.debounce_ms,
         });
-    } else {
-        let config_bytes = read_to_string(&opts.config)?;
-        let seedo_toml: SeedoToml = toml::from_str(&config_bytes)?;
-        configs.extend(seedo_toml.seedo);
     }
 
     let mut seedos = vec![];
