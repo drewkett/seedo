@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{bail, ensure, Context, Result};
+use notify::{RecursiveMode, Watcher};
 use os_str_bytes::OsStrBytes;
 use path_absolutize::Absolutize;
 use regex::bytes::Regex;
@@ -94,6 +95,7 @@ impl Pattern {
 pub struct GlobWatcher {
     patterns: Vec<Pattern>,
     base_directories: Vec<PathBuf>,
+    read_ignores: bool,
 }
 
 impl GlobWatcher {
@@ -118,12 +120,13 @@ impl GlobWatcher {
         Ok(false)
     }
 
-    pub fn from_pattern(pattern: &str) -> Result<GlobWatcher> {
-        GlobWatcher::from_patterns(&[pattern])
+    pub fn from_pattern(pattern: &str, read_ignores: bool) -> Result<GlobWatcher> {
+        GlobWatcher::from_patterns(&[pattern], read_ignores)
     }
 
     pub fn from_patterns(
         patterns: impl IntoIterator<Item = impl AsRef<str>>,
+        read_ignores: bool,
     ) -> Result<GlobWatcher> {
         let patterns: Result<Vec<Pattern>> = patterns
             .into_iter()
@@ -150,9 +153,30 @@ impl GlobWatcher {
                 }
             })
             .collect();
+        let mut watcher = notify::recommended_watcher(|res| match res {
+            Ok(event) => println!("event: {:?}", event),
+            Err(e) => println!("watch error: {:?}", e),
+        })?;
+        let mut base_iter = base_directories.iter();
+        if read_ignores {
+            let first_dir = base_iter.next().context("no based directory")?;
+            let mut builder = ignore::WalkBuilder::new(first_dir);
+            for p in base_iter {
+                builder.add(p);
+            }
+            for item in builder.build() {
+                let item = item?;
+                watcher.watch(item.path(), RecursiveMode::NonRecursive)?;
+            }
+        } else {
+            for p in base_iter {
+                watcher.watch(p, RecursiveMode::Recursive)?;
+            }
+        }
         Ok(GlobWatcher {
             patterns,
             base_directories,
+            read_ignores,
         })
     }
 }
