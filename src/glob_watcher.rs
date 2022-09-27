@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{bail, ensure, Context, Result};
-use notify::{RecursiveMode, Watcher};
+use notify::{event::CreateKind, Event, EventKind, RecursiveMode, Watcher};
 use os_str_bytes::OsStrBytes;
 use path_absolutize::Absolutize;
 use regex::bytes::Regex;
@@ -94,7 +94,6 @@ impl Pattern {
 #[derive(Debug)]
 pub struct GlobWatcher {
     patterns: Vec<Pattern>,
-    base_directories: Vec<PathBuf>,
     read_ignores: bool,
 }
 
@@ -153,10 +152,19 @@ impl GlobWatcher {
                 }
             })
             .collect();
-        let mut watcher = notify::recommended_watcher(|res| match res {
-            Ok(event) => println!("event: {:?}", event),
-            Err(e) => println!("watch error: {:?}", e),
-        })?;
+        let (watch_filter_snd, watch_filter_rcv) = crossbeam_channel::unbounded();
+        let (result_snd, result_rcv) = crossbeam_channel::unbounded();
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
+                Ok(event) => match event.kind {
+                    EventKind::Access(_) | EventKind::Other => {}
+                    _ => {
+                        let _ = watch_filter_snd.send(event);
+                    }
+                    _ => {}
+                },
+                Err(e) => println!("watch error: {:?}", e),
+            })?;
         let mut base_iter = base_directories.iter();
         if read_ignores {
             let first_dir = base_iter.next().context("no based directory")?;
@@ -173,9 +181,27 @@ impl GlobWatcher {
                 watcher.watch(p, RecursiveMode::Recursive)?;
             }
         }
+        std::thread::spawn(move || {
+            while let Ok(event) = watch_filter_rcv.recv() {
+                match event.kind {
+                    EventKind::Create(CreateKind::File) => {
+                        for p in &event.paths {
+                            let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+                        }
+                    }
+                    EventKind::Create(CreateKind::Folder) => {
+                        for p in &event.paths {
+                            let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+                        }
+                    }
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {}
+                    _ => {}
+                }
+                let _ = result_snd.send(event);
+            }
+        });
         Ok(GlobWatcher {
             patterns,
-            base_directories,
             read_ignores,
         })
     }

@@ -244,12 +244,12 @@ fn try_main(opts: Opts) -> anyhow::Result<()> {
         let config_bytes = read_to_string(&opts.config)?;
         let seedo_toml: SeedoToml = toml::from_str(&config_bytes)?;
         for config in &seedo_toml.seedo {
-            let watcher = GlobWatcher::from_patterns(&config.globs)?;
+            let watcher = GlobWatcher::from_patterns(&config.globs, !config.skip_ignore_files)?;
             println!("{:#?}", watcher);
         }
         configs.extend(seedo_toml.seedo);
     } else {
-        let _watcher = GlobWatcher::from_patterns(&opts.glob)?;
+        let _watcher = GlobWatcher::from_patterns(&opts.glob, !opts.skip_ignore_files)?;
         configs.push(SeedoConfig {
             command_to_run: CommandToRun::Vec(opts.command_to_run.clone()),
             globs: opts.glob.clone(),
